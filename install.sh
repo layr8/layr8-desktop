@@ -31,6 +31,10 @@ PROTO="--proto =https --tlsv1.2"
 APP_NAME="Layr8.app"
 
 die() { echo "install: $*" >&2; exit 1; }
+# The two sentences a person reads when no build can be installed (owner's words, rule ad19efbd, LAYR8-2452): the list or the manifest
+# was READ and the answer is "none" / it was NOT read. Never the same sentence, each printed alone, each a refusal (exit 1).
+say_none() { echo "No stable build is available yet. Nothing was installed." >&2; exit 1; }
+say_not_read() { echo "Could not reach GitHub. Nothing was installed. Try again." >&2; exit 1; }
 
 # BEGIN RELEASE KEYS (generated from desktop/release-keys.json; do not edit by hand)
 KEY_COUNT=2
@@ -122,40 +126,36 @@ main() {
   esac
 
   # ---- 1. the candidate: only a name, never trusted ----------------------------------------------------------------------
-  # Three readings, kept apart (LAYR8-2452): the list was read and names a build / it was read and there is none / it was not
-  # read. "Did not read" is never "no update", and nothing here falls back to another channel or to an older build.
+  # Three readings, kept apart (LAYR8-2452): the list was read and names a build / it was read and there is none (say_none) / it was
+  # not read (say_not_read). "Did not read" is never "none", and nothing here falls back to another channel or to an older build.
   if [ "$channel" = "next" ]; then
     # The newest release of any kind, prereleases included (the Atom feed lists them; drafts are not in it).
-    feed="$(curl $PROTO -fsSL "$HOST/$REPO/releases.atom")" || die "could not read the release list of $REPO (GitHub did not answer); this is not \"no update\"; nothing was installed"
+    feed="$(curl $PROTO -fsSL "$HOST/$REPO/releases.atom" 2>/dev/null)" || say_not_read
     tag="$(printf '%s' "$feed" | grep -o 'releases/tag/[^"]*' | head -1 | sed 's|releases/tag/||')" || tag=""
-    [ -n "$tag" ] || die "no build has been published on the next channel yet; nothing was installed"
+    [ -n "$tag" ] || say_none
   else
     # GitHub's latest release, which a prerelease never is; the redirect names its tag. Without a full release GitHub answers 404
     # (or sends the page of the whole list), and that is the answer "there is none".
-    got="$(curl $PROTO -sSL -o /dev/null -w '%{http_code} %{url_effective}' "$HOST/$REPO/releases/latest")" || die "could not read the latest release of $REPO (GitHub did not answer); this is not \"no update\"; nothing was installed"
+    got="$(curl $PROTO -sSL -o /dev/null -w '%{http_code} %{url_effective}' "$HOST/$REPO/releases/latest" 2>/dev/null)" || say_not_read
     code="${got%% *}"
     url="${got#* }"
     case "$code" in
       200 | 404) : ;;
-      *) die "could not read the latest release of $REPO (HTTP $code); this is not \"no update\"; nothing was installed" ;;
+      *) say_not_read ;;
     esac
     tag="${url##*/releases/tag/}"
     [ "$tag" != "$url" ] || tag=""
-    [ -n "$tag" ] || die "no stable build has been published yet (the latest channel has no release); nothing was installed"
+    [ -n "$tag" ] || say_none
   fi
   printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || die "the ${channel} channel names a release that is not a build tag (${tag}); nothing was installed"
 
   # ---- 2. the manifest and its signature --------------------------------------------------------------------------------
   base="$HOST/$REPO/releases/download/$tag"
-  code="$(curl $PROTO -sSL -o "$work/release.json" -w '%{http_code}' "$base/release.json")" || die "could not read release.json of $tag (GitHub did not answer); this is not \"no update\"; nothing was installed"
+  code="$(curl $PROTO -sSL -o "$work/release.json" -w '%{http_code}' "$base/release.json" 2>/dev/null)" || say_not_read
   case "$code" in
     200) : ;;
-    404)
-      if [ "$channel" = "latest" ]; then
-        die "$tag, the newest stable release, has no signed manifest (release.json), so there is no signed stable build to install yet; nothing was installed"
-      fi
-      die "$tag has no signed manifest (release.json); nothing was installed" ;;
-    *) die "could not read release.json of $tag (HTTP $code); this is not \"no update\"; nothing was installed" ;;
+    404) say_none ;;
+    *) say_not_read ;;
   esac
   curl $PROTO -fsSL "$base/release.json.sig" -o "$work/release.json.sig" || die "could not download release.json.sig of $tag (a release with no signature is not installed)"
   [ -s "$work/release.json.sig" ] || die "the signature of $tag is empty"
