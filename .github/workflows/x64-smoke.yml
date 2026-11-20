@@ -1,0 +1,26 @@
+name: x64 smoke
+# The Intel smoke of each release (LAYR8-2109; owner rule 60f672cc, "可以同步跑不block": it runs beside the release and blocks
+# nothing). GitHub's hosted Intel Mac (macos-15-intel, rule 7aabe0fc: macos-13 is retired and below the app's macOS 14) installs
+# the x64 build with install.sh, launches it and checks that its bundled broker starts (scripts/x64-smoke.sh). No job needs it
+# and no branch protection names it. Red shows on this repository's Actions page only: someone reads it after each release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The newest release on next (v0.1.0-internal.<N>); empty: whatever is newest'
+        required: false
+        default: ''
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install the x64 build, launch it, check that its broker starts
+        env:
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+        run: sh scripts/x64-smoke.sh "$TAG"
