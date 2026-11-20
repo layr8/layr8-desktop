@@ -13,19 +13,51 @@
 #      would, so the installer's Intel path runs too. With <tag>, that build must be <tag> (the feed can lag the release by a
 #      minute: it is tried again);
 #   3. the app, its broker and its Claude binary are x86_64 only, and the Claude binary runs;
-#   4. the app is launched, and its bundled broker starts: it installs itself to ~/.local/bin (`__desktop-install`, which the
-#      app runs at its first start on a person's own HOME), and the copy there carries the bundled broker's build;
+#   4. the app is launched, and it starts a broker daemon from its own bundled copy (Contents/Resources/bin/layr8-broker),
+#      which `file` also reads as x86_64. A packaged app starts a daemon only for a chosen profile, so the smoke first writes
+#      the choice the app reads (<userData>/profile.json, profile smoke/x64). No other layr8-broker may be where the app
+#      looks for an installed one (~/.local/bin, /opt/homebrew/bin, /usr/local/bin, PATH), so the bundled copy is the only one
+#      it can start. Then the daemon's log, which the app opens for that profile (~/.layr8/broker-smoke.x64.log), holds the
+#      broker's own output; a process seen running `<bundled copy> daemon` counts too. The profile is not enrolled, so the
+#      daemon exits after its first line: what is checked is that the app started it. ~/.local/bin is not checked: on a
+#      HOME with no broker installed, the app copies nothing there (src/broker/desktop-install.ts, "not-installed");
 #   5. the app is still running a few seconds later.
 #
+# What the smoke saw is kept in $RUNNER_TEMP/layr8-x64-smoke (the workflow uploads it, red or green): the app's stderr and
+# stdout apart, a process list every 10 s, `file` on the app and the broker, and the daemon's log. A failure from step 4 on
+# also prints their last lines.
+#
 # The last line of every run is one plain line: "x64 smoke: broker started (<version>) on <tag>", or
-# "x64 smoke: FAILED at <step>: <why> (<tag>)". Uses sh, uname, sysctl, defaults, lipo, sed and grep.
+# "x64 smoke: FAILED at <step>: <why> (<tag>)". Uses sh, uname, sysctl, defaults, lipo, file, ps, sed, grep, tail, cp and mkdir.
 set -u
 
 tag="${1:-}"
 on="${tag:-the newest build on next}"
 step="1 Intel"
 app_pid=""
+waited=""
+diag="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/layr8-x64-smoke"
+mkdir -p "$diag"
+profile="smoke/x64"
+daemon_log="$HOME/.layr8/broker-smoke.x64.log"
+# A process list (the app, brokers, Claude) and ~/.local/bin, appended to ps.txt.
+snapshot() {
+  { echo "--- ${waited:-?}s"
+    ps -axww -o pid,ppid,stat,etime,command 2>&1 | grep -i -e '[L]ayr8' -e '[l]ayr8-broker' -e '[c]laude'
+    ls -la "$HOME/.local/bin" 2>&1; } >> "$diag/ps.txt"
+}
+# Everything kept so far, and the last lines of each, into the job's output.
+dump() {
+  [ -z "$app_pid" ] || snapshot
+  [ ! -e "$daemon_log" ] || cp "$daemon_log" "$diag/daemon.log"
+  ls -la "$HOME/.layr8" "$HOME/Library/Application Support/Layr8" > "$diag/state.txt" 2>&1
+  for f in app.stderr app.stdout daemon.log file.txt state.txt; do
+    [ ! -s "$diag/$f" ] || { echo "--- $f (last 40 lines)"; tail -40 "$diag/$f"; }
+  done
+  [ ! -s "$diag/ps.txt" ] || { echo "--- ps.txt (last snapshot)"; sed -n '/^--- /h;/^--- /!H;${x;p;}' "$diag/ps.txt"; }
+}
 fail() {
+  [ "${step%% *}" -lt 4 ] || dump
   [ -z "$app_pid" ] || kill "$app_pid" 2>/dev/null
   echo "x64 smoke: FAILED at $step: $* ($on)"
   exit 1
@@ -71,17 +103,35 @@ step="4 broker"
 bundled="$("$broker" version --json 2>/dev/null)" || fail "the bundled broker does not run"
 want="$(printf '%s' "$bundled" | commit_of)"
 [ -n "$want" ] || fail "the bundled broker reports no build commit: $bundled"
-log="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/layr8-x64-smoke-app.log"
-"$app/Contents/MacOS/Layr8" > "$log" 2>&1 &
+printf '%s\n' "$bundled" > "$diag/bundled-version.json"
+file "$broker" "$app/Contents/MacOS/Layr8" > "$diag/file.txt" 2>&1
+kind="$(file -b "$broker" 2>&1)"
+case "$kind" in *x86_64*) ;; *) fail "file reads the bundled broker as \"$kind\", not x86_64" ;; esac
+# The app starts an installed broker in preference to its own copy (desktop/src/core/daemon-link.mjs installedBroker):
+# none may be there, or a daemon seen below would not be the bundled one.
+old_ifs="$IFS"; IFS=:
+for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin $PATH; do
+  [ ! -e "$d/layr8-broker" ] || { IFS="$old_ifs"; fail "$d/layr8-broker exists, so the app would start that broker, not its own copy"; }
+done
+IFS="$old_ifs"
+support="$HOME/Library/Application Support/Layr8"
+mkdir -p "$support"
+printf '{"profile":"%s"}\n' "$profile" > "$support/profile.json"
+log="$diag/app.stderr"
+"$app/Contents/MacOS/Layr8" > "$diag/app.stdout" 2> "$log" &
 app_pid=$!
-installed="$HOME/.local/bin/layr8-broker"
 waited=0
-until [ -x "$installed" ] && [ "$("$installed" version --json 2>/dev/null | commit_of)" = "$want" ]; do
-  kill -0 "$app_pid" 2>/dev/null || { app_pid=""; fail "the app exited before its broker started; its last line: $(tail -1 "$log")"; }
-  [ "$waited" -lt "${SMOKE_WAIT:-120}" ] || fail "the app's broker did not install itself to ~/.local/bin within ${SMOKE_WAIT:-120}s"
+seen=""
+until [ -n "$seen" ] || [ -s "$daemon_log" ]; do
+  [ $((waited % 10)) -ne 0 ] || snapshot
+  kill -0 "$app_pid" 2>/dev/null || { app_pid=""; fail "the app exited before it started a broker daemon; its last line: $(tail -1 "$log")"; }
+  [ "$waited" -lt "${SMOKE_WAIT:-120}" ] || fail "the app started no broker daemon from its own copy within ${SMOKE_WAIT:-120}s (no \`$broker daemon\` process seen, and ~/.layr8/broker-smoke.x64.log is empty)"
   sleep 1
   waited=$((waited + 1))
+  seen="$(ps -axww -o command 2>/dev/null | grep -F -x -e "$broker daemon" || true)"
 done
+snapshot
+[ ! -e "$daemon_log" ] || cp "$daemon_log" "$diag/daemon.log"
 
 # ---- 5 ----
 step="5 running"
