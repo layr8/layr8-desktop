@@ -11,7 +11,8 @@
 #
 # What it trusts: the public keys below (desktop/release-keys.json, kept equal by a test) and nothing the release page says.
 # The release list only names a candidate. Every statement about the candidate (tag, version, channel, architecture, the
-# zip's digest) is read from release.json AFTER its signature verified with /usr/bin/openssl. Any failed check stops the
+# zip's digest) is read from its manifest AFTER the signature verified with /usr/bin/openssl. Each release carries one build
+# per architecture (LAYR8-2109): Apple silicon reads release.json, an Intel Mac reads release-x64.json. Any failed check stops the
 # script with the reason; nothing is installed and nothing falls back to an unchecked path.
 #
 # Uses only what a Mac with no Command Line Tools has: curl, /usr/bin/openssl (LibreSSL), shasum, ditto, codesign,
@@ -113,9 +114,13 @@ main() {
 
   # ---- the Mac ----------------------------------------------------------------------------------------------------------
   [ "$(uname -s)" = "Darwin" ] || die "this app is for macOS only"
-  # Apple silicon only. A terminal running under Rosetta reports x86_64, so ask the CPU itself.
-  arm="$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)"
-  [ "$arm" = "1" ] || die "this app needs a Mac with Apple silicon; this one is not"
+  # Which build this Mac takes (LAYR8-2109). A terminal running under Rosetta reports x86_64, so ask the CPU itself:
+  # 1 is Apple silicon (release.json); 0, absent or unreadable is an Intel Mac (release-x64.json).
+  if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then
+    want="arm64"; manifest="release.json"
+  else
+    want="x64"; manifest="release-x64.json"
+  fi
   macos="$(sw_vers -productVersion)"
 
   channel="${LAYR8_UPDATE_CHANNEL:-latest}"
@@ -151,15 +156,17 @@ main() {
 
   # ---- 2. the manifest and its signature --------------------------------------------------------------------------------
   base="$HOST/$REPO/releases/download/$tag"
-  code="$(curl $PROTO -sSL -o "$work/release.json" -w '%{http_code}' "$base/release.json" 2>/dev/null)" || say_not_read
+  # This Mac's manifest, kept as $work/release.json whichever it is. On an Intel Mac a 404 is a release that exists and has no
+  # Intel build (one from before LAYR8-2109): said as such, never "none" and never the Apple silicon build.
+  code="$(curl $PROTO -sSL -o "$work/release.json" -w '%{http_code}' "$base/$manifest" 2>/dev/null)" || say_not_read
   case "$code" in
     200) : ;;
-    404) say_none ;;
+    404) [ "$want" = "x64" ] && die "$tag has no build for Intel Macs; nothing was changed"; say_none ;;
     *) say_not_read ;;
   esac
   # The signature file is read by the same rule as release.json: a 404 is the server's answer that there is no signed build (none);
   # anything else (503, a cut connection, no route) is not-read. Never an explanation, never an install.
-  code="$(curl $PROTO -sSL -o "$work/release.json.sig" -w '%{http_code}' "$base/release.json.sig" 2>/dev/null)" || say_not_read
+  code="$(curl $PROTO -sSL -o "$work/release.json.sig" -w '%{http_code}' "$base/$manifest.sig" 2>/dev/null)" || say_not_read
   case "$code" in
     200) : ;;
     404) say_none ;;
@@ -194,7 +201,8 @@ main() {
   ok=""
   for c in $accepted; do [ "$c" = "$mchannel" ] && ok=1; done
   [ -n "$ok" ] || die "$tag is on the ${mchannel:-unknown} channel; you asked for ${channel}"
-  [ "$(field arch)" = "arm64" ] || die "the build is not for Apple silicon"
+  march="$(field arch)"
+  [ "$march" = "$want" ] || die "the build is for ${march:-no architecture}; this Mac needs $want"
   minmac="$(field minMacOS)"
   cmp="$(mac_cmp "$macos" "$minmac")"
   [ "$cmp" != "bad" ] || die "could not compare macOS $macos with the build's minimum ${minmac:-none}"
@@ -211,8 +219,8 @@ main() {
 
   # The signed bytes must be exactly the canonical manifest release.mjs writes, rebuilt here from the values just read: an
   # extra field, other spacing or a duplicate key would be read differently by this script and by the app's parser.
-  printf '{\n  "schema": 1,\n  "product": "%s",\n  "version": "%s",\n  "tag": "%s",\n  "channel": "%s",\n  "arch": "arm64",\n  "minMacOS": "%s",\n  "files": {\n    "%s": {\n      "sha256": "%s",\n      "bytes": %s\n    }\n  },\n  "keyId": "%s"\n}\n' \
-    "$PRODUCT" "$version" "$mtag" "$mchannel" "$minmac" "$zipname" "$want_sha" "$want_bytes" "$signer" > "$work/canonical.json"
+  printf '{\n  "schema": 1,\n  "product": "%s",\n  "version": "%s",\n  "tag": "%s",\n  "channel": "%s",\n  "arch": "%s",\n  "minMacOS": "%s",\n  "files": {\n    "%s": {\n      "sha256": "%s",\n      "bytes": %s\n    }\n  },\n  "keyId": "%s"\n}\n' \
+    "$PRODUCT" "$version" "$mtag" "$mchannel" "$want" "$minmac" "$zipname" "$want_sha" "$want_bytes" "$signer" > "$work/canonical.json"
   cmp -s "$work/canonical.json" "$work/release.json" || die "the signed manifest is not in the canonical form (an extra field, other spacing or a duplicate key)"
 
   # not over a newer app, and not over one whose version cannot be read: "did not read" is not "nothing to protect"
