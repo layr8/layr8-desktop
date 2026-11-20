@@ -1,0 +1,21 @@
+name: check installer
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: install.sh, installer-pin.json and README.md agree
+        run: sh scripts/check-installer.sh
+      - name: the published address still serves the pinned install.sh
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: sh scripts/check-installer.sh --online
