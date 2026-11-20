@@ -157,7 +157,14 @@ main() {
     404) say_none ;;
     *) say_not_read ;;
   esac
-  curl $PROTO -fsSL "$base/release.json.sig" -o "$work/release.json.sig" || die "could not download release.json.sig of $tag (a release with no signature is not installed)"
+  # The signature file is read by the same rule as release.json: a 404 is the server's answer that there is no signed build (none);
+  # anything else (503, a cut connection, no route) is not-read. Never an explanation, never an install.
+  code="$(curl $PROTO -sSL -o "$work/release.json.sig" -w '%{http_code}' "$base/release.json.sig" 2>/dev/null)" || say_not_read
+  case "$code" in
+    200) : ;;
+    404) say_none ;;
+    *) say_not_read ;;
+  esac
   [ -s "$work/release.json.sig" ] || die "the signature of $tag is empty"
 
   signer=""
