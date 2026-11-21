@@ -25,7 +25,8 @@ jobs:
           TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
         run: sh scripts/x64-smoke.sh "$TAG"
       # Red or green, what the smoke saw: the app's stderr and stdout, a process list every 10 s, `file` on the app and the
-      # broker, and the daemon's log (scripts/x64-smoke.sh writes them to $RUNNER_TEMP/layr8-x64-smoke).
+      # broker, the daemon's log, and on a failure what the app's windows say, such as an error dialog
+      # (scripts/x64-smoke.sh writes them to $RUNNER_TEMP/layr8-x64-smoke).
       - name: keep what the smoke saw
         if: always()
         uses: actions/upload-artifact@v4
