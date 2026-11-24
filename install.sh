@@ -116,9 +116,11 @@ make_work() {
 # Every exit (LAYR8-2404). Between the two moves of swap_in the installed app is at $old and nothing is at $dest/$APP_NAME: a
 # signal there (Ctrl-C, a closed terminal, SIGTERM) used to end the run with no app at all. Now the old app is put back and
 # that is said. Once the new app is in place, the old one is only removed. A second signal cannot cut this short. A SIGKILL
-# cannot be caught: then the old app is left at $old, beside where it was.
+# cannot be caught: then the old app is left at $old, beside where it was. set +e: once the terminal has closed, stderr cannot
+# be written, and under set -e the failed echo would end this before the work folder is removed.
 on_exit() {
   st=$?
+  set +e
   trap '' INT TERM HUP
   if [ -n "${old:-}" ] && [ -e "$old" ]; then
     if [ -e "$dest/$APP_NAME" ]; then
