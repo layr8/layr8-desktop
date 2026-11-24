@@ -100,17 +100,60 @@ field() {
   sed -n "s/^  \"$1\": \"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}\$/\1/p" "$work/release.json"
 }
 
+# The private work folder is made next to the destination, on the same volume, so that the final move is one atomic rename
+# and a failure cannot leave half an app (a mv across volumes copies). From here on a signal ends the run (exit 1), and every
+# exit, a signal's included, goes through on_exit.
+make_work() {
+  dest="$HOME/Applications"
+  old=""
+  mkdir -p "$dest" || die "could not make $dest"
+  work="$(mktemp -d "$dest/.layr8-install.XXXXXX")" || die "could not make a private folder"
+  trap on_exit EXIT
+  trap 'exit 1' INT TERM HUP
+  chmod 700 "$work"
+}
+
+# Every exit (LAYR8-2404). Between the two moves of swap_in the installed app is at $old and nothing is at $dest/$APP_NAME: a
+# signal there (Ctrl-C, a closed terminal, SIGTERM) used to end the run with no app at all. Now the old app is put back and
+# that is said. Once the new app is in place, the old one is only removed. A second signal cannot cut this short. A SIGKILL
+# cannot be caught: then the old app is left at $old, beside where it was. set +e: once the terminal has closed, stderr cannot
+# be written, and under set -e the failed echo would end this before the work folder is removed.
+on_exit() {
+  st=$?
+  set +e
+  trap '' INT TERM HUP
+  if [ -n "${old:-}" ] && [ -e "$old" ]; then
+    if [ -e "$dest/$APP_NAME" ]; then
+      rm -rf "$old" || :
+    elif mv "$old" "$dest/$APP_NAME"; then
+      echo "install: stopped before the new app was in place; the old one is back" >&2
+    else
+      echo "install: stopped before the new app was in place; the installed app is at $old" >&2
+    fi
+  fi
+  rm -rf "$work" || :
+  exit "$st"
+}
+
+# The installed app moves aside, the new one ($app, unpacked and verified in $work) moves in, and only then is the old one
+# removed. A failed move-in puts the old app back here; any other exit in between is on_exit's.
+swap_in() {
+  if [ -e "$dest/$APP_NAME" ]; then
+    old="$dest/$APP_NAME.old-$$"
+    mv "$dest/$APP_NAME" "$old" || die "could not move the installed app aside"
+  fi
+  if ! mv "$app" "$dest/$APP_NAME"; then
+    [ -z "$old" ] || mv "$old" "$dest/$APP_NAME"
+    die "could not put the new app in place; the old one is back"
+  fi
+  [ -z "$old" ] || rm -rf "$old"
+  old=""
+}
+
 # The whole run is one function called on the last line: a download cut anywhere is a syntax error (or defines it and
 # never calls it), so a truncated `curl | sh` can neither move the installed app aside nor leave it that way.
 main() {
-  # The private work folder is made next to the destination, on the same volume, so that the final move is one atomic rename
-  # and a failure cannot leave half an app (a mv across volumes copies).
-  dest="$HOME/Applications"
-  mkdir -p "$dest" || die "could not make $dest"
-  work="$(mktemp -d "$dest/.layr8-install.XXXXXX")" || die "could not make a private folder"
-  trap 'rm -rf "$work"' EXIT
-  trap 'exit 1' INT TERM HUP
-  chmod 700 "$work"
+  make_work
 
   # ---- the Mac ----------------------------------------------------------------------------------------------------------
   [ "$(uname -s)" = "Darwin" ] || die "this app is for macOS only"
@@ -252,16 +295,7 @@ main() {
   [ "$bundle_version" = "$version" ] || die "the app inside says ${bundle_version:-no version}, not the manifest's $version"
 
   # ---- 5. install -------------------------------------------------------------------------------------------------------
-  old=""
-  if [ -e "$dest/$APP_NAME" ]; then
-    old="$dest/$APP_NAME.old-$$"
-    mv "$dest/$APP_NAME" "$old" || die "could not move the installed app aside"
-  fi
-  if ! mv "$app" "$dest/$APP_NAME"; then
-    [ -z "$old" ] || mv "$old" "$dest/$APP_NAME"
-    die "could not put the new app in place; the old one is back"
-  fi
-  [ -z "$old" ] || rm -rf "$old"
+  swap_in
 
   # the channel the person chose, for the app's own update check
   if [ -n "${LAYR8_UPDATE_CHANNEL:-}" ]; then
