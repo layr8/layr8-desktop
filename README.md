@@ -3,7 +3,7 @@
 Paste this in Terminal:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/layr8/layr8-desktop/9fae58614b06042117b55ce3f009a5544498f220/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/layr8/layr8-desktop/50683e862d05532fe410e4e2bd0d1dbc50861c45/install.sh | sh
 ```
 
 To update, run it again.
